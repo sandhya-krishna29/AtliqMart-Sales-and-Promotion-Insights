@@ -1,0 +1,122 @@
+/* 1. Provide a list of products with a base price greater than 500 and that are featured in promo type of ‘BOGOF’ (Buy One Get One Free) */
+
+SELECT DISTINCT
+    (dp.product_name), fe.base_price
+FROM
+    dim_products dp
+        INNER JOIN
+    fact_events fe ON dp.product_code = fe.product_code
+WHERE
+    fe.base_price > 500
+        AND fe.promo_type = 'BOGOF';
+
+/* Number of stores by city */
+SELECT 
+    city, COUNT(store_id) AS number_of_stores
+FROM
+    dim_stores
+GROUP BY city
+ORDER BY number_of_stores DESC;
+
+
+/* creating a temporary table to avoid repetitive calculations */
+CREATE temporary table summary AS
+SELECT *,
+    CASE
+        WHEN promo_type = 'BOGOF' THEN `quantity_sold(after_promo)` * 2
+        ELSE `quantity_sold(after_promo)`
+    END AS quantity_sold_after_promo_including_bogof,
+    CASE
+		WHEN promo_type="50% OFF" THEN base_price*0.5
+        WHEN promo_type="25% OFF" THEN base_price*0.75
+        WHEN promo_type="33% OFF" THEN base_price*0.67
+        WHEN promo_type="BOGOF" THEN base_price*0.5
+        WHEN promo_type="500 Cashback" THEN base_price-500
+	END AS base_price_after_promo
+FROM fact_events;
+
+ALTER TABLE summary
+ADD COLUMN revenue_before_promo decimal(10,2),
+ADD COLUMN revenue_after_promo decimal(10,2);
+
+SET SQL_SAFE_UPDATES = 0;
+
+UPDATE summary
+SET revenue_before_promo = `quantity_sold(before_promo)` * base_price;
+
+UPDATE summary
+SET revenue_after_promo =  quantity_sold_after_promo_including_bogof * base_price_after_promo;
+
+ALTER TABLE summary
+ADD COLUMN ISU integer,
+ADD COLUMN ISR DECIMAL(10,2);
+
+UPDATE summary
+SET ISR= revenue_after_promo-revenue_before_promo;
+
+UPDATE summary
+SET ISU= `quantity_sold(after_promo)` - `quantity_sold(before_promo)`;
+
+
+SELECT * FROM summary;
+
+/* Revenue before and after promo of different promotion categories */
+SELECT 
+    dc.campaign_name,
+    CONCAT(ROUND(SUM(s.revenue_before_promo) / 1000000,
+                    2),
+            'M') AS revenue_before_promo,
+    CONCAT(ROUND(SUM(s.revenue_after_promo) / 1000000,
+                    2),
+            'M') AS revenue_after_promo
+FROM
+    dim_campaigns dc
+        JOIN
+    summary s ON dc.campaign_id = s.campaign_id
+GROUP BY dc.campaign_name;
+
+
+
+/* ISU by product category during Diwali sales */
+
+SELECT 
+    dp.category,
+    CONCAT(ROUND((((SUM(s.`quantity_sold(after_promo)`) - SUM(s.`quantity_sold(before_promo)`)) / SUM(s.`quantity_sold(before_promo)`)) * 100),
+                    2),
+            '%') AS 'ISU%',
+RANK() OVER (ORDER BY ((((SUM(s.`quantity_sold(after_promo)`) - SUM(s.`quantity_sold(before_promo)`)) / SUM(s.`quantity_sold(before_promo)`)) * 100)) DESC) AS 'rank'
+FROM
+    summary s
+        JOIN
+    dim_products dp ON s.product_code = dp.product_code JOIN dim_campaigns dc ON dc.campaign_id = s.campaign_id
+WHERE
+    dc.campaign_name = 'Diwali'
+GROUP BY dp.category;
+
+SELECT 
+    dp.category,
+    CONCAT(ROUND((SUM(s.ISU)/SUM(s.`quantity_sold(before_promo)`)*100),2),"%"),
+    RANK() OVER(ORDER BY SUM(s.ISU)/SUM(s.`quantity_sold(before_promo)`) DESC) AS rank_order
+FROM
+    summary s
+        JOIN
+    dim_products dp ON s.product_code = dp.product_code
+WHERE
+    s.campaign_id = 'CAMP_DIW_01'
+GROUP BY dp.category;
+
+/* Top 5 products with highest incrmental revenue */
+SELECT 
+    dp.product_name,
+    dp.category,
+    CONCAT(ROUND((SUM(s.ISR) / SUM(s.revenue_before_promo)) * 100,
+                    2),
+            '%') AS `IR%`
+FROM
+    summary s
+        JOIN
+    dim_products dp ON s.product_code = dp.product_code
+GROUP BY dp.product_name
+ORDER BY `IR%` DESC
+LIMIT 5;
+
